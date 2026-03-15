@@ -74,6 +74,8 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
+      <Include>
+      </Include>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
