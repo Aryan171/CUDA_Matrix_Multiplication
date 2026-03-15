@@ -1,0 +1,6 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="CUDA_Matrix_Multiplication/CUDA_Matrix_Multiplication.vcxproj" />
+</Solution>
