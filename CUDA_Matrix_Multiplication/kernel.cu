@@ -5,7 +5,7 @@
 #include <random>
 #include <nvtx3/nvToolsExt.h>
 
-#define THREADS_PER_BLOCK 32
+#define BLOCK_DIM 32
 
 //#define USER_INPUT
 
@@ -48,6 +48,32 @@ __global__ void cudaMatrixMultiplyNaive(int* a, int* b, int* c, int m, int n, in
 	}
 }
 
+__global__ void cudaMatrixMultiplyTiled(int* a, int* b, int* c, int m, int n, int p) {
+	__shared__ int tileA[BLOCK_DIM][BLOCK_DIM],
+		tileB[BLOCK_DIM][BLOCK_DIM];
+	int row = blockIdx.y * blockDim.y + threadIdx.y,
+		column = blockIdx.x * blockDim.x + threadIdx.x;
+
+	int t = 0;
+
+	for (int i = 0; i < n; i += BLOCK_DIM) {
+		tileA[threadIdx.y][threadIdx.x] = (row < m && threadIdx.x + i < n) ? a[row * n + threadIdx.x + i] : 0;
+		tileB[threadIdx.y][threadIdx.x] = (column < p && threadIdx.y + i < n) ? b[(threadIdx.y + i) * p + column] : 0;
+
+		__syncthreads();
+
+		for (int j = 0; j < BLOCK_DIM; j++) {
+			t += tileA[threadIdx.y][j] * tileB[j][threadIdx.x];
+		}
+
+		__syncthreads();
+	}
+
+	if (row < m && column < p) {
+		c[row * p + column] = t;
+	}
+}
+
 int main()
 {
 	int m, n, p, deviceId;
@@ -61,9 +87,9 @@ int main()
 	printf("Enter the number of columns of matrix b ");
 	scanf("%d", &p);
 #else
-	m = 1028;
-	n = 1028;
-	p = 1028;
+	m = 1024;
+	n = 1024;
+	p = 1024;
 #endif
 
 	int sizeA = m * n * sizeof(int),
@@ -100,12 +126,24 @@ int main()
 	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
 
 	uint3 gridSize = dim3(
-		(p + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK,
-		(m + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK);
-	cudaMatrixMultiplyNaive << <gridSize, dim3(THREADS_PER_BLOCK, THREADS_PER_BLOCK) >> > (a, b, c2, m, n, p);
+		(p + BLOCK_DIM - 1) / BLOCK_DIM,
+		(m + BLOCK_DIM - 1) / BLOCK_DIM);
+	cudaMatrixMultiplyNaive << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM) >> > (a, b, c2, m, n, p);
 
-	// Verify the result
+	// verify the result
 	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
 	cudaDeviceSynchronize();
+	printf("Verifying result for naive implementation");
+	verify(c, c2, m * p);
+
+	// optimized GPU Matrix Multiplication
+	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
+
+	cudaMatrixMultiplyTiled << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM) >> > (a, b, c2, m, n, p);
+
+	// verify the result
+	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
+	cudaDeviceSynchronize();
+	printf("Verifying result for tiled implementation");
 	verify(c, c2, m * p);
 }
