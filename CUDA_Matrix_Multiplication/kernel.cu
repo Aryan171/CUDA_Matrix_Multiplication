@@ -115,8 +115,8 @@ __global__ void cudaMatrixMultiplyNaive(float* __restrict__ a, float* __restrict
 }
 
 __global__ void cudaMatrixMultiplyTiled(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
-	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM],
-		tileB[BLOCK_DIM][BLOCK_DIM];
+	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM + 1], // + 1 to avoid bank conflicts
+		tileB[BLOCK_DIM][BLOCK_DIM + 1];
 	int row = blockIdx.y * blockDim.y + threadIdx.y,
 		column = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -141,8 +141,8 @@ __global__ void cudaMatrixMultiplyTiled(float* __restrict__ a, float* __restrict
 }
 
 __global__ void cudaMatrixMultiply1DBlockTiling(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
-	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM],
-		tileB[BLOCK_DIM][BLOCK_DIM];
+	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM + 1], // + 1 to avoid bank conflicts
+		tileB[BLOCK_DIM][BLOCK_DIM + 1];
 	float result[BLOCK_TILE_SIZE] = {};
 
 	int rowStart = (blockIdx.y * blockDim.y + threadIdx.y) * BLOCK_TILE_SIZE,
@@ -177,8 +177,8 @@ __global__ void cudaMatrixMultiply1DBlockTiling(float* __restrict__ a, float* __
 }
 
 __global__ void cudaMatrixMultiply2DBlockTiling(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
-	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM],
-		tileB[BLOCK_DIM][BLOCK_DIM];
+	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM + 1], // + 1 to avoid bank conflicts
+		tileB[BLOCK_DIM][BLOCK_DIM + 1];
 	float result[BLOCK_TILE_SIZE][BLOCK_TILE_SIZE] = {};
 
 	int rowStart = (blockIdx.y * blockDim.y + threadIdx.y) * BLOCK_TILE_SIZE,
@@ -217,8 +217,8 @@ __global__ void cudaMatrixMultiply2DBlockTiling(float* __restrict__ a, float* __
 }
 
 __global__ void cudaMatrixMultiplyDoubleBuffering(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
-	__shared__ float tileA[2][BLOCK_DIM][BLOCK_DIM],
-		tileB[2][BLOCK_DIM][BLOCK_DIM];
+	__shared__ float tileA[2][BLOCK_DIM][BLOCK_DIM + 1], // + 1 to avoid bank conflicts
+		tileB[2][BLOCK_DIM][BLOCK_DIM + 1];
 	int row = blockIdx.y * blockDim.y + threadIdx.y,
 		column = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -242,6 +242,60 @@ __global__ void cudaMatrixMultiplyDoubleBuffering(float* __restrict__ a, float* 
 
 	if (row < m && column < p) {
 		c[row * p + column] = t;
+	}
+}
+
+// combining the optimization techniques together to achieve the most optimal GPU Matrix Multiplication implementation
+__global__ void cudaMatrixMultiplyMostOptimal(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
+	__shared__ float tileA[2][BLOCK_DIM][BLOCK_DIM + 1], // + 1 to avoid bank conflicts
+		tileB[2][BLOCK_DIM][BLOCK_DIM + 1];
+	float result[BLOCK_TILE_SIZE][BLOCK_TILE_SIZE] = {};
+
+	int rowStart = (blockIdx.y * blockDim.y + threadIdx.y) * BLOCK_TILE_SIZE,
+		columnStart = (blockIdx.x * blockDim.x + threadIdx.x) * BLOCK_TILE_SIZE;
+
+	for (int j = 0; j < BLOCK_TILE_SIZE; j++) {
+		for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+			int tileRow = threadIdx.y * BLOCK_TILE_SIZE + j,
+				tileCol = threadIdx.x * BLOCK_TILE_SIZE + k,
+				aRow = rowStart + j, aCol = tileCol,
+				bRow = tileRow, bCol = columnStart + k;
+			tileA[0][tileRow][tileCol] = (aRow < m && aCol < n) ? a[aRow * n + aCol] : 0;
+			tileB[0][tileRow][tileCol] = (bRow < n && bCol < p) ? b[bRow * p + bCol] : 0;
+		}
+	}
+
+	__syncthreads();
+
+	for (int i = 0; i < n; i += BLOCK_DIM) {
+		int current = (i / BLOCK_DIM) % 2, next = (current + 1) % 2;
+
+		for (int j = 0; j < BLOCK_TILE_SIZE; j++) {
+			for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+				int tileRow = threadIdx.y * BLOCK_TILE_SIZE + j,
+					tileCol = threadIdx.x * BLOCK_TILE_SIZE + k,
+					aRow = rowStart + j, aCol = tileCol + i + BLOCK_DIM,
+					bRow = tileRow + i + BLOCK_DIM, bCol = columnStart + k;
+				tileA[next][tileRow][tileCol] = (aRow < m && aCol < n) ? a[aRow * n + aCol] : 0;
+				tileB[next][tileRow][tileCol] = (bRow < n && bCol < p) ? b[bRow * p + bCol] : 0;
+			}
+		}
+
+		for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+			for (int l = 0; l < BLOCK_TILE_SIZE; l++) {
+				for (int j = 0; j < BLOCK_DIM; j++) {
+					result[k][l] += tileA[current][threadIdx.y * BLOCK_TILE_SIZE + k][j] * tileB[current][j][threadIdx.x * BLOCK_TILE_SIZE + l];
+				}
+			}
+		}
+
+		__syncthreads();
+	}
+
+	for (int i = 0; i < BLOCK_TILE_SIZE && i + rowStart < m; i++) {
+		for (int j = 0; j < BLOCK_TILE_SIZE && j + columnStart < p; j++) {
+			c[(i + rowStart) * p + j + columnStart] = result[i][j];
+		}
 	}
 }
 
@@ -352,6 +406,13 @@ int main()
 	cudaMatrixMultiplyDoubleBuffering << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM) >> > (a, b, c2, m, n, p);
 	// verify the result
 	printf("Verifying result for double buffered implementation\n");
+	verify(c, c2, m * p);
+
+
+	// most optimal GPU Matrix Multiplication
+	cudaMatrixMultiplyMostOptimal << <gridSize, dim3(BLOCK_DIM / BLOCK_TILE_SIZE, BLOCK_DIM / BLOCK_TILE_SIZE) >> > (a, b, c2, m, n, p);
+	// verify the result
+	printf("Verifying result for most optial implementation\n");
 	verify(c, c2, m * p);
 
 
