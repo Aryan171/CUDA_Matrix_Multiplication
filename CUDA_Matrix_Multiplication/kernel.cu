@@ -18,15 +18,38 @@ void initializeMatrix(float* matrix, int size) {
 	}
 }
 
-void verify(float* c, float* d, int size) {
-	float delta = 1e-3;
-	for (int i = 0; i < size; i++) {
-		if (abs(c[i] - d[i]) > delta) {
-			printf("Verification failed at index %d: %f != %f\n", i, c[i], d[i]);
+__global__ void verifyKernel(float* __restrict__ c, float* __restrict__ d, int* success, int size, float delta) {
+	int stride = gridDim.x * blockDim.x;
+
+	for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size && *success != 0; i += stride) {
+		if (fabsf(c[i] - d[i]) > delta) {
+			atomicExch(success, 0);
 			return;
 		}
 	}
-	printf("Verification successful!\n");
+}
+
+void verify(float* c, float* d, int size) {
+	float delta = 1e-3f;
+	int* success;
+	cudaMallocHost(&success, sizeof(int));
+	success[0] = 1;
+
+	int threadsPerBlock = 256;
+	int blocksPerGrid = 512;
+
+	verifyKernel << <blocksPerGrid, threadsPerBlock >> > (c, d, success, size, delta);
+
+	cudaDeviceSynchronize();
+
+	if (*success == 1) {
+		printf("Verification successful!\n");
+	}
+	else {
+		printf("Verification failed! (At least one mismatch found)\n");
+	}
+
+	cudaFree(success);
 }
 
 void matrixMultiplyCublas(float* a, float* b, float* c, int m, int n, int p) {
@@ -255,86 +278,63 @@ int main()
 
 #ifdef PERFORM_CPU_MATRIX_MULTIPLICATION
 	// CPU Matrix Multiplication
+	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
 	nvtxRangePushA("CPU Matrix Multiplication\n");
 	matrixMultiplyCpu(a, b, c2, m, n, p);
 	nvtxRangePop();
+
+	// verify the result
+	printf("Verifying result for CPU implementation\n");
+	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
+	verify(c, c2, m * p);
+#endif
+
 
 	cudaMemPrefetchAsync(a, sizeA, deviceLocation, 0);
 	cudaMemPrefetchAsync(b, sizeB, deviceLocation, 0);
 	cudaDeviceSynchronize();
 
-	// verify the result
-	printf("Verifying result for CPU implementation\n");
-	cudaDeviceSynchronize();
-	verify(c, c2, m * p);
-#endif
-
-
+	uint3 gridSize = dim3((p + BLOCK_DIM - 1) / BLOCK_DIM, (m + BLOCK_DIM - 1) / BLOCK_DIM);
 
 	// naive GPU Matrix Multiplication
-	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
-	uint3 gridSize = dim3(
-		(p + BLOCK_DIM - 1) / BLOCK_DIM,
-		(m + BLOCK_DIM - 1) / BLOCK_DIM);
 	cudaMatrixMultiplyNaive << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM) >> > (a, b, c2, m, n, p);
-
 	// verify the result
-	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
-	cudaDeviceSynchronize();
 	printf("Verifying result for naive implementation\n");
 	verify(c, c2, m * p);
 
 
 
 	// memory tiling optimized GPU Matrix Multiplication
-	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
-
 	cudaMatrixMultiplyTiled << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM) >> > (a, b, c2, m, n, p);
-
 	// verify the result
-	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
-	cudaDeviceSynchronize();
 	printf("Verifying result for tiled implementation\n");
 	verify(c, c2, m * p);
 
 
 
 	// 1D block tiling optimization GPU Matrix Multiplication
-	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
-
 	cudaMatrixMultiply1DBlockTiling << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM / BLOCK_TILE_SIZE) >> > (a, b, c2, m, n, p);
-	
 	// verify the result
-	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
-	cudaDeviceSynchronize();
 	printf("Verifying result for 1D block tiling implementation\n");
 	verify(c, c2, m * p);
 
 
 
 	// 2D block tiling optimization GPU Matrix Multiplication
-	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
-
 	cudaMatrixMultiply2DBlockTiling << <gridSize, dim3(BLOCK_DIM / BLOCK_TILE_SIZE, BLOCK_DIM / BLOCK_TILE_SIZE) >> > (a, b, c2, m, n, p);
-
 	// verify the result
-	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
-	cudaDeviceSynchronize();
 	printf("Verifying result for 2D block tiling implementation\n");
 	verify(c, c2, m* p);
 
 
 
 	// double buffering optimization GPU Matrix Multiplication
-	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
-
 	cudaMatrixMultiplyDoubleBuffering << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM) >> > (a, b, c2, m, n, p);
-
 	// verify the result
-	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
-	cudaDeviceSynchronize();
 	printf("Verifying result for double buffered implementation\n");
 	verify(c, c2, m * p);
+
+
 
 	cudaFree(a);
 	cudaFree(b);
