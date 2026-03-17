@@ -115,7 +115,7 @@ __global__ void cudaMatrixMultiply1DBlockTiling(float* __restrict__ a, float* __
 				bRow = tileRow + i, bCol = column;
 
 			tileA[tileRow][tileCol] = (aRow < m && aCol < n) ? a[aRow * n + aCol] : 0;
-			tileB[tileRow][tileCol] = (bRow < n && bCol < p) ? b[bRow * p + column] : 0;
+			tileB[tileRow][tileCol] = (bRow < n && bCol < p) ? b[bRow * p + bCol] : 0;
 		}
 
 		__syncthreads();
@@ -132,6 +132,46 @@ __global__ void cudaMatrixMultiply1DBlockTiling(float* __restrict__ a, float* __
 	if (column < p) {
 		for (int i = rowStart, j = 0; i < m && j < BLOCK_TILE_SIZE; i++, j++) {
 			c[i * p + column] = result[j];
+		}
+	}
+}
+
+__global__ void cudaMatrixMultiply2DBlockTiling(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
+	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM],
+		tileB[BLOCK_DIM][BLOCK_DIM];
+	float result[BLOCK_TILE_SIZE][BLOCK_TILE_SIZE] = {};
+
+	int rowStart = (blockIdx.y * blockDim.y + threadIdx.y) * BLOCK_TILE_SIZE,
+		columnStart = (blockIdx.x * blockDim.x + threadIdx.x) * BLOCK_TILE_SIZE;
+
+	for (int i = 0; i < n; i += BLOCK_DIM) {
+		for (int j = 0; j < BLOCK_TILE_SIZE; j++) {
+			for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+				int tileRow = threadIdx.y * BLOCK_TILE_SIZE + j,
+					tileCol = threadIdx.x * BLOCK_TILE_SIZE + k,
+					aRow = rowStart + j, aCol = tileCol + i,
+					bRow = tileRow + i, bCol = columnStart + k;
+				tileA[tileRow][tileCol] = (aRow < m && aCol < n) ? a[aRow * n + aCol] : 0;
+				tileB[tileRow][tileCol] = (bRow < n && bCol < p) ? b[bRow * p + bCol] : 0;
+			}
+		}
+
+		__syncthreads();
+
+		for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+			for (int l = 0; l < BLOCK_TILE_SIZE; l++) {
+				for (int j = 0; j < BLOCK_DIM; j++) {
+					result[k][l] += tileA[threadIdx.y * BLOCK_TILE_SIZE + k][j] * tileB[j][threadIdx.x * BLOCK_TILE_SIZE + l];
+				}
+			}
+		}
+
+		__syncthreads();
+	}
+
+	for (int i = 0; i < BLOCK_TILE_SIZE && i + rowStart < m; i++) {
+		for (int j = 0; j < BLOCK_TILE_SIZE && j + columnStart < p; j++) {
+			c[(i + rowStart) * p + j + columnStart] = result[i][j];
 		}
 	}
 }
@@ -269,6 +309,19 @@ int main()
 	cudaDeviceSynchronize();
 	printf("Verifying result for 1D block tiling implementation\n");
 	verify(c, c2, m * p);
+
+
+
+	// 2D block tiling optimization GPU Matrix Multiplication
+	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
+
+	cudaMatrixMultiply2DBlockTiling << <gridSize, dim3(BLOCK_DIM / BLOCK_TILE_SIZE, BLOCK_DIM / BLOCK_TILE_SIZE) >> > (a, b, c2, m, n, p);
+
+	// verify the result
+	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
+	cudaDeviceSynchronize();
+	printf("Verifying result for 2D block tiling implementation\n");
+	verify(c, c2, m* p);
 
 
 
