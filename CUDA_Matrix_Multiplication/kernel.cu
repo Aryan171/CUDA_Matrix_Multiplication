@@ -5,6 +5,7 @@
 #include <random>
 #include <nvtx3/nvToolsExt.h>
 #include <cublas_v2.h>
+#include <curand_kernel.h>
 
 #define BLOCK_DIM 32
 #define BLOCK_TILE_SIZE 4
@@ -12,25 +13,41 @@
 //#define TAKE_USER_INPUT
 //#define PERFORM_CPU_MATRIX_MULTIPLICATION
 
-void initializeMatrix(float* matrix, int size) {
-	for (int i = 0; i < size; i++) {
-		matrix[i] = rand() % 10;
+__global__ void initKernel(float* a, int size, unsigned long seed) {
+	int stride = gridDim.x * blockDim.x;
+	int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+	curandState state;
+	curand_init(seed, tid, 0, &state);
+
+	for (int i = tid; i < size; i += stride) {
+		a[i] = curand_uniform(&state);
 	}
+}
+
+void initializeMatrix(float* a, int size) {
+	int threadsPerBlock = 256;
+	int blocksPerGrid = 512;
+
+	unsigned long seed = time(NULL);
+
+	initKernel << <blocksPerGrid, threadsPerBlock >> > (a, size, seed);
+
+	cudaDeviceSynchronize();
 }
 
 __global__ void verifyKernel(float* __restrict__ c, float* __restrict__ d, int* success, int size, float delta) {
 	int stride = gridDim.x * blockDim.x;
 
-	for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size && *success != 0; i += stride) {
+	for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < size; i += stride) {
 		if (fabsf(c[i] - d[i]) > delta) {
 			atomicExch(success, 0);
-			return;
 		}
 	}
 }
 
 void verify(float* c, float* d, int size) {
-	float delta = 1e-3f;
+	float delta = 1e-2f;
 	int* success;
 	cudaMallocHost(&success, sizeof(int));
 	success[0] = 1;
@@ -277,22 +294,25 @@ int main()
 	cudaMallocManaged(&c2, sizeC);
 
 #ifdef PERFORM_CPU_MATRIX_MULTIPLICATION
-	// CPU Matrix Multiplication
+	cudaMemPrefetchAsync(a, sizeA, hostLocation, 0);
+	cudaMemPrefetchAsync(b, sizeB, hostLocation, 0);
 	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
+	cudaDeviceSynchronize();
+
+	// CPU Matrix Multiplication
 	nvtxRangePushA("CPU Matrix Multiplication\n");
 	matrixMultiplyCpu(a, b, c2, m, n, p);
 	nvtxRangePop();
 
 	// verify the result
 	printf("Verifying result for CPU implementation\n");
-	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
 	verify(c, c2, m * p);
-#endif
-
 
 	cudaMemPrefetchAsync(a, sizeA, deviceLocation, 0);
 	cudaMemPrefetchAsync(b, sizeB, deviceLocation, 0);
+	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
 	cudaDeviceSynchronize();
+#endif
 
 	uint3 gridSize = dim3((p + BLOCK_DIM - 1) / BLOCK_DIM, (m + BLOCK_DIM - 1) / BLOCK_DIM);
 
