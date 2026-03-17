@@ -100,6 +100,42 @@ __global__ void cudaMatrixMultiplyTiled(float* __restrict__ a, float* __restrict
 	}
 }
 
+__global__ void cudaMatrixMultiply1DBlockTiling(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
+	__shared__ float tileA[BLOCK_DIM][BLOCK_DIM],
+		tileB[BLOCK_DIM][BLOCK_DIM];
+	float result[BLOCK_TILE_SIZE] = {};
+
+	int rowStart = (blockIdx.y * blockDim.y + threadIdx.y) * BLOCK_TILE_SIZE,
+		column = blockIdx.x * blockDim.x + threadIdx.x;
+
+	for (int i = 0; i < n; i += BLOCK_DIM) {
+		for (int j = 0; j < BLOCK_TILE_SIZE; j++) {
+			int tileRow = threadIdx.y * BLOCK_TILE_SIZE + j, tileCol = threadIdx.x,
+				aRow = rowStart + j, aCol = tileCol + i,
+				bRow = tileRow + i, bCol = column;
+
+			tileA[tileRow][tileCol] = (aRow < m && aCol < n) ? a[aRow * n + aCol] : 0;
+			tileB[tileRow][tileCol] = (bRow < n && bCol < p) ? b[bRow * p + column] : 0;
+		}
+
+		__syncthreads();
+
+		for (int j = 0; j < BLOCK_DIM; j++) {
+			for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+				result[k] += tileA[threadIdx.y * BLOCK_TILE_SIZE + k][j] * tileB[j][threadIdx.x];
+			}
+		}
+
+		__syncthreads();
+	}
+
+	if (column < p) {
+		for (int i = rowStart, j = 0; i < m && j < BLOCK_TILE_SIZE; i++, j++) {
+			c[i * p + column] = result[j];
+		}
+	}
+}
+
 __global__ void cudaMatrixMultiplyDoubleBuffering(float* __restrict__ a, float* __restrict__ b, float* __restrict__ c, int m, int n, int p) {
 	__shared__ float tileA[2][BLOCK_DIM][BLOCK_DIM],
 		tileB[2][BLOCK_DIM][BLOCK_DIM];
@@ -117,7 +153,7 @@ __global__ void cudaMatrixMultiplyDoubleBuffering(float* __restrict__ a, float* 
 
 		tileA[next][threadIdx.y][threadIdx.x] = (row < m && threadIdx.x + i + BLOCK_DIM < n) ? a[row * n + threadIdx.x + i + BLOCK_DIM] : 0;
 		tileB[next][threadIdx.y][threadIdx.x] = (column < p && threadIdx.y + i + BLOCK_DIM < n) ? b[(threadIdx.y + i + BLOCK_DIM) * p + column] : 0;
-		
+
 		for (int j = 0; j < BLOCK_DIM; j++) {
 			t += tileA[current][threadIdx.y][j] * tileB[current][j][threadIdx.x];
 		}
@@ -219,6 +255,19 @@ int main()
 	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
 	cudaDeviceSynchronize();
 	printf("Verifying result for tiled implementation\n");
+	verify(c, c2, m * p);
+
+
+
+	// 1D block tiling optimization GPU Matrix Multiplication
+	cudaMemPrefetchAsync(c2, sizeC, deviceLocation, 0);
+
+	cudaMatrixMultiply1DBlockTiling << <gridSize, dim3(BLOCK_DIM, BLOCK_DIM / BLOCK_TILE_SIZE) >> > (a, b, c2, m, n, p);
+	
+	// verify the result
+	cudaMemPrefetchAsync(c2, sizeC, hostLocation, 0);
+	cudaDeviceSynchronize();
+	printf("Verifying result for 1D block tiling implementation\n");
 	verify(c, c2, m * p);
 
 
