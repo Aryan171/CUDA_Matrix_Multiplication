@@ -38,3 +38,5 @@ For a 5000 X 5000 matrix on an RTX 2050:
 Naive GPU: ~95 GFLOPS  
 Most Optimal: ~272 GFLOPS  
 cuBlas: ~578 GFLOPS  
+
+![](Screenshot%202026-03-18%20235648.png)
