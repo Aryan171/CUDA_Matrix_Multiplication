@@ -254,7 +254,9 @@ __global__ void cudaMatrixMultiplyMostOptimal(float* __restrict__ a, float* __re
 	int rowStart = (blockIdx.y * blockDim.y + threadIdx.y) * BLOCK_TILE_SIZE,
 		columnStart = (blockIdx.x * blockDim.x + threadIdx.x) * BLOCK_TILE_SIZE;
 
+#pragma unroll
 	for (int j = 0; j < BLOCK_TILE_SIZE; j++) {
+#pragma unroll
 		for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
 			int tileRow = threadIdx.y * BLOCK_TILE_SIZE + j,
 				tileCol = threadIdx.x * BLOCK_TILE_SIZE + k,
@@ -269,8 +271,10 @@ __global__ void cudaMatrixMultiplyMostOptimal(float* __restrict__ a, float* __re
 
 	for (int i = 0; i < n; i += BLOCK_DIM) {
 		int current = (i / BLOCK_DIM) % 2, next = (current + 1) % 2;
-
+		
+#pragma unroll
 		for (int j = 0; j < BLOCK_TILE_SIZE; j++) {
+#pragma unroll
 			for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
 				int tileRow = threadIdx.y * BLOCK_TILE_SIZE + j,
 					tileCol = threadIdx.x * BLOCK_TILE_SIZE + k,
@@ -281,10 +285,25 @@ __global__ void cudaMatrixMultiplyMostOptimal(float* __restrict__ a, float* __re
 			}
 		}
 
-		for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+		float fragA[BLOCK_TILE_SIZE], fragB[BLOCK_TILE_SIZE];
+
+		// regester tiling
+		for (int j = 0; j < BLOCK_DIM; j++) {
+#pragma unroll
+			for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+				fragA[k] = tileA[current][threadIdx.y * BLOCK_TILE_SIZE + k][j];
+			}
+
+#pragma unroll
 			for (int l = 0; l < BLOCK_TILE_SIZE; l++) {
-				for (int j = 0; j < BLOCK_DIM; j++) {
-					result[k][l] += tileA[current][threadIdx.y * BLOCK_TILE_SIZE + k][j] * tileB[current][j][threadIdx.x * BLOCK_TILE_SIZE + l];
+				fragB[l] = tileB[current][j][threadIdx.x * BLOCK_TILE_SIZE + l];
+			}
+
+#pragma unroll
+			for (int k = 0; k < BLOCK_TILE_SIZE; k++) {
+#pragma unroll
+				for (int l = 0; l < BLOCK_TILE_SIZE; l++) {
+					result[k][l] += fragA[k] * fragB[l];
 				}
 			}
 		}
@@ -292,7 +311,9 @@ __global__ void cudaMatrixMultiplyMostOptimal(float* __restrict__ a, float* __re
 		__syncthreads();
 	}
 
+#pragma unroll
 	for (int i = 0; i < BLOCK_TILE_SIZE && i + rowStart < m; i++) {
+#pragma unroll
 		for (int j = 0; j < BLOCK_TILE_SIZE && j + columnStart < p; j++) {
 			c[(i + rowStart) * p + j + columnStart] = result[i][j];
 		}
